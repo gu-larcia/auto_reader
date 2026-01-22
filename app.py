@@ -1,4 +1,4 @@
-# Auto-Reader v1.0.1
+# Auto-Reader v1.0.2
 # File-to-speech with position persistence using edge-tts.
 
 import asyncio
@@ -14,7 +14,7 @@ from streamlit.components.v1 import html
 
 from extractors import extract_text, clean_text, chunk_into_paragraphs
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 VOICE = "en-US-JennyNeural"  # Female US English neural voice
 
 st.set_page_config(
@@ -248,7 +248,28 @@ def get_player_component(chunks: list[str], doc_id: str, audio_cache: dict[int, 
                 updateProgress();
             }}
             
+            // Event handlers - set once at initialization
+            audio.addEventListener("ended", function() {{
+                if (isPlaying) {{
+                    currentChunk++;
+                    currentTime = 0;
+                    savePosition();
+                    if (currentChunk < chunks.length) {{
+                        updateDisplay();
+                        loadAndPlayChunk(0);
+                    }} else {{
+                        stop();
+                        document.getElementById("progress").textContent = "Finished!";
+                    }}
+                }}
+            }});
+            
+            audio.addEventListener("timeupdate", savePosition);
+            
             function loadAndPlayChunk(startTime = 0) {{
+                // Update display first
+                updateDisplay();
+                
                 if (currentChunk >= chunks.length) {{
                     stop();
                     document.getElementById("progress").textContent = "Finished!";
@@ -270,27 +291,6 @@ def get_player_component(chunks: list[str], doc_id: str, audio_cache: dict[int, 
                     }}
                     audio.play();
                 }};
-                
-                audio.onended = function() {{
-                    if (isPlaying) {{
-                        currentChunk++;
-                        currentTime = 0;
-                        savePosition();
-                        if (currentChunk < chunks.length) {{
-                            updateDisplay();
-                            loadAndPlayChunk(0);
-                        }} else {{
-                            stop();
-                            document.getElementById("progress").textContent = "Finished!";
-                        }}
-                    }}
-                }};
-                
-                audio.ontimeupdate = function() {{
-                    savePosition();
-                }};
-                
-                updateDisplay();
             }}
             
             function play() {{
