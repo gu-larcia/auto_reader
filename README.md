@@ -1,6 +1,6 @@
 # Auto-Reader
 
-v1.0.1
+v1.0.2
 
 Upload a document. Press play. Pause. Close browser. Return. Resume from exact position.
 
