@@ -1,50 +1,59 @@
-"""
-Auto-Reader: File-to-speech with position persistence.
-Uses browser's Web Speech API for TTS with pause/resume capability.
-"""
+# Auto-Reader v1.0.1
+# File-to-speech with position persistence using edge-tts.
 
+import asyncio
+import base64
+import hashlib
 import json
 import tempfile
 from pathlib import Path
 
+import edge_tts
 import streamlit as st
 from streamlit.components.v1 import html
 
 from extractors import extract_text, clean_text, chunk_into_paragraphs
 
+VERSION = "1.0.1"
+VOICE = "en-US-JennyNeural"  # Female US English neural voice
 
-# Page config
 st.set_page_config(
     page_title="Auto-Reader",
     page_icon="📖",
     layout="centered",
 )
 
-# Minimal CSS
 st.markdown("""
 <style>
-    .stApp {
-        max-width: 800px;
-        margin: 0 auto;
-    }
-    .block-container {
-        padding-top: 2rem;
-    }
+    .stApp { max-width: 800px; margin: 0 auto; }
+    .block-container { padding-top: 2rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
-def get_tts_component(chunks: list[str], doc_id: str) -> str:
+async def generate_audio(text: str) -> bytes:
+    """Generate MP3 audio from text using edge-tts."""
+    communicate = edge_tts.Communicate(text, VOICE)
+    audio_data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_data += chunk["data"]
+    return audio_data
+
+
+def get_audio_base64(text: str) -> str:
+    """Generate audio and return as base64 string."""
+    audio_bytes = asyncio.run(generate_audio(text))
+    return base64.b64encode(audio_bytes).decode("utf-8")
+
+
+def get_player_component(chunks: list[str], doc_id: str, audio_cache: dict[int, str]) -> str:
     """
-    Generate HTML/JS component for Web Speech API TTS.
-    
-    Features:
-    - Play/Pause/Stop controls
-    - Speed slider
-    - Voice selector
-    - Position tracking (paragraph + word index)
-    - localStorage persistence keyed by doc_id
+    HTML/JS component with HTML5 audio player.
+    Pre-generated audio chunks with native pause/play controls.
+    Position persisted to localStorage.
     """
+    audio_json = json.dumps(audio_cache)
     chunks_json = json.dumps(chunks)
     
     return f"""
@@ -119,14 +128,10 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
                 font-size: 13px;
                 color: #aaa;
             }}
-            select, input[type="range"] {{
+            input[type="range"] {{
                 background: #262730;
                 border: 1px solid #444;
                 border-radius: 4px;
-                color: #fafafa;
-                padding: 6px 10px;
-            }}
-            input[type="range"] {{
                 width: 100px;
             }}
             .progress {{
@@ -143,15 +148,6 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
                 line-height: 1.7;
                 min-height: 120px;
                 white-space: pre-wrap;
-            }}
-            .word {{
-                transition: background 0.1s;
-            }}
-            .word.current {{
-                background: #4CAF50;
-                color: white;
-                padding: 2px 4px;
-                border-radius: 3px;
             }}
             .nav-buttons {{
                 display: flex;
@@ -178,10 +174,6 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
         
         <div class="settings">
             <div class="setting">
-                <label for="voice">Voice:</label>
-                <select id="voice"></select>
-            </div>
-            <div class="setting">
                 <label for="rate">Speed:</label>
                 <input type="range" id="rate" min="0.5" max="2" step="0.1" value="1">
                 <span id="rateVal">1.0x</span>
@@ -191,7 +183,7 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
         <div class="progress" id="progress">Ready</div>
         
         <div class="chunk-display" id="chunkDisplay">
-            Upload a file and press Play to begin.
+            Press Play to begin reading.
         </div>
         
         <div class="nav-buttons">
@@ -200,73 +192,25 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             <button class="nav-btn" onclick="resetPosition()">↺ Reset</button>
         </div>
         
+        <audio id="audioPlayer" style="display:none;"></audio>
+        
         <script>
             const DOC_ID = "{doc_id}";
             const STORAGE_KEY = "autoreader_" + DOC_ID;
             const chunks = {chunks_json};
+            const audioData = {audio_json};
             
-            let synth = window.speechSynthesis;
-            let utterance = null;
+            const audio = document.getElementById("audioPlayer");
             let currentChunk = 0;
-            let currentWord = 0;
-            let isPaused = false;
-            let voices = [];
-            let selectedVoice = null;
+            let currentTime = 0;
+            let isPlaying = false;
             
-            // Load voices
-            function loadVoices() {{
-                voices = synth.getVoices();
-                const select = document.getElementById("voice");
-                select.innerHTML = "";
-                
-                voices.forEach((voice, i) => {{
-                    const option = document.createElement("option");
-                    option.value = i;
-                    option.textContent = voice.name + " (" + voice.lang + ")";
-                    if (voice.default) option.selected = true;
-                    select.appendChild(option);
-                }});
-                
-                // Load saved voice preference
-                const saved = localStorage.getItem(STORAGE_KEY + "_voice");
-                if (saved && voices[saved]) {{
-                    select.value = saved;
-                }}
-                selectedVoice = voices[select.value];
-            }}
-            
-            if (synth.onvoiceschanged !== undefined) {{
-                synth.onvoiceschanged = loadVoices;
-            }}
-            loadVoices();
-            
-            document.getElementById("voice").onchange = function() {{
-                selectedVoice = voices[this.value];
-                localStorage.setItem(STORAGE_KEY + "_voice", this.value);
-            }};
-            
-            // Rate slider
-            const rateSlider = document.getElementById("rate");
-            const rateVal = document.getElementById("rateVal");
-            rateSlider.oninput = function() {{
-                rateVal.textContent = parseFloat(this.value).toFixed(1) + "x";
-                localStorage.setItem(STORAGE_KEY + "_rate", this.value);
-            }};
-            
-            // Load saved rate
-            const savedRate = localStorage.getItem(STORAGE_KEY + "_rate");
-            if (savedRate) {{
-                rateSlider.value = savedRate;
-                rateVal.textContent = parseFloat(savedRate).toFixed(1) + "x";
-            }}
-            
-            // Load saved position
             function loadPosition() {{
                 const saved = localStorage.getItem(STORAGE_KEY);
                 if (saved) {{
                     const pos = JSON.parse(saved);
                     currentChunk = Math.min(pos.chunk || 0, chunks.length - 1);
-                    currentWord = pos.word || 0;
+                    currentTime = pos.time || 0;
                 }}
                 updateDisplay();
             }}
@@ -274,8 +218,22 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             function savePosition() {{
                 localStorage.setItem(STORAGE_KEY, JSON.stringify({{
                     chunk: currentChunk,
-                    word: currentWord
+                    time: audio.currentTime || 0
                 }}));
+            }}
+            
+            const rateSlider = document.getElementById("rate");
+            const rateVal = document.getElementById("rateVal");
+            rateSlider.oninput = function() {{
+                rateVal.textContent = parseFloat(this.value).toFixed(1) + "x";
+                audio.playbackRate = parseFloat(this.value);
+                localStorage.setItem(STORAGE_KEY + "_rate", this.value);
+            }};
+            
+            const savedRate = localStorage.getItem(STORAGE_KEY + "_rate");
+            if (savedRate) {{
+                rateSlider.value = savedRate;
+                rateVal.textContent = parseFloat(savedRate).toFixed(1) + "x";
             }}
             
             function updateProgress() {{
@@ -286,71 +244,41 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             
             function updateDisplay() {{
                 if (chunks.length === 0) return;
-                
-                const text = chunks[currentChunk];
-                const words = text.split(/(\\s+)/);
-                
-                let html = "";
-                let wordIndex = 0;
-                
-                for (let i = 0; i < words.length; i++) {{
-                    if (words[i].trim()) {{
-                        const isCurrent = wordIndex === currentWord;
-                        html += '<span class="word' + (isCurrent ? ' current' : '') + '">' + 
-                                escapeHtml(words[i]) + '</span>';
-                        wordIndex++;
-                    }} else {{
-                        html += words[i];
-                    }}
-                }}
-                
-                document.getElementById("chunkDisplay").innerHTML = html;
+                document.getElementById("chunkDisplay").textContent = chunks[currentChunk];
                 updateProgress();
             }}
             
-            function escapeHtml(text) {{
-                const div = document.createElement("div");
-                div.textContent = text;
-                return div.innerHTML;
-            }}
-            
-            function speakChunk() {{
+            function loadAndPlayChunk(startTime = 0) {{
                 if (currentChunk >= chunks.length) {{
                     stop();
+                    document.getElementById("progress").textContent = "Finished!";
                     return;
                 }}
                 
-                const text = chunks[currentChunk];
-                const words = text.split(/\\s+/).filter(w => w);
-                
-                // If resuming mid-chunk, slice from current word
-                let textToSpeak = text;
-                if (currentWord > 0 && currentWord < words.length) {{
-                    textToSpeak = words.slice(currentWord).join(" ");
+                const b64 = audioData[currentChunk];
+                if (!b64) {{
+                    console.error("No audio for chunk", currentChunk);
+                    return;
                 }}
                 
-                utterance = new SpeechSynthesisUtterance(textToSpeak);
-                utterance.voice = selectedVoice;
-                utterance.rate = parseFloat(rateSlider.value);
+                audio.src = "data:audio/mp3;base64," + b64;
+                audio.playbackRate = parseFloat(rateSlider.value);
                 
-                // Word boundary tracking
-                let spokenWordIndex = currentWord;
-                utterance.onboundary = function(event) {{
-                    if (event.name === "word") {{
-                        currentWord = spokenWordIndex;
-                        spokenWordIndex++;
-                        updateDisplay();
-                        savePosition();
+                audio.onloadedmetadata = function() {{
+                    if (startTime > 0 && startTime < audio.duration) {{
+                        audio.currentTime = startTime;
                     }}
+                    audio.play();
                 }};
                 
-                utterance.onend = function() {{
-                    if (!isPaused) {{
+                audio.onended = function() {{
+                    if (isPlaying) {{
                         currentChunk++;
-                        currentWord = 0;
+                        currentTime = 0;
                         savePosition();
                         if (currentChunk < chunks.length) {{
-                            speakChunk();
+                            updateDisplay();
+                            loadAndPlayChunk(0);
                         }} else {{
                             stop();
                             document.getElementById("progress").textContent = "Finished!";
@@ -358,25 +286,22 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
                     }}
                 }};
                 
-                utterance.onerror = function(e) {{
-                    console.error("Speech error:", e);
+                audio.ontimeupdate = function() {{
+                    savePosition();
                 }};
                 
-                synth.speak(utterance);
                 updateDisplay();
             }}
             
             function play() {{
                 if (chunks.length === 0) return;
                 
-                if (isPaused) {{
-                    // Resume
-                    isPaused = false;
-                    speakChunk();
+                isPlaying = true;
+                
+                if (audio.paused && audio.src && audio.src.startsWith("data:")) {{
+                    audio.play();
                 }} else {{
-                    // Start fresh or from saved position
-                    synth.cancel();
-                    speakChunk();
+                    loadAndPlayChunk(currentTime);
                 }}
                 
                 document.getElementById("playBtn").disabled = true;
@@ -385,8 +310,8 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             }}
             
             function pause() {{
-                isPaused = true;
-                synth.cancel();
+                isPlaying = false;
+                audio.pause();
                 savePosition();
                 
                 document.getElementById("playBtn").disabled = false;
@@ -394,8 +319,10 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             }}
             
             function stop() {{
-                isPaused = false;
-                synth.cancel();
+                isPlaying = false;
+                audio.pause();
+                audio.currentTime = 0;
+                currentTime = 0;
                 savePosition();
                 
                 document.getElementById("playBtn").disabled = false;
@@ -404,10 +331,10 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             }}
             
             function prevChunk() {{
-                synth.cancel();
-                isPaused = true;
+                isPlaying = false;
+                audio.pause();
                 currentChunk = Math.max(0, currentChunk - 1);
-                currentWord = 0;
+                currentTime = 0;
                 savePosition();
                 updateDisplay();
                 
@@ -416,10 +343,10 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             }}
             
             function nextChunk() {{
-                synth.cancel();
-                isPaused = true;
+                isPlaying = false;
+                audio.pause();
                 currentChunk = Math.min(chunks.length - 1, currentChunk + 1);
-                currentWord = 0;
+                currentTime = 0;
                 savePosition();
                 updateDisplay();
                 
@@ -428,10 +355,11 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
             }}
             
             function resetPosition() {{
-                synth.cancel();
-                isPaused = false;
+                isPlaying = false;
+                audio.pause();
+                audio.src = "";
                 currentChunk = 0;
-                currentWord = 0;
+                currentTime = 0;
                 savePosition();
                 updateDisplay();
                 
@@ -440,7 +368,6 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
                 document.getElementById("stopBtn").disabled = true;
             }}
             
-            // Initialize
             loadPosition();
         </script>
     </body>
@@ -449,10 +376,9 @@ def get_tts_component(chunks: list[str], doc_id: str) -> str:
 
 
 def main():
-    st.title("📖 Auto-Reader")
-    st.caption("Upload a document. It reads. You can pause. It remembers where you stopped.")
+    st.title("Auto-Reader")
+    st.caption(f"v{VERSION}")
     
-    # File upload
     uploaded_file = st.file_uploader(
         "Choose a file",
         type=["pdf", "epub", "docx", "txt", "md"],
@@ -460,12 +386,9 @@ def main():
     )
     
     if uploaded_file:
-        # Create document ID from filename for localStorage key
-        doc_id = uploaded_file.name.replace(" ", "_").replace(".", "_")
+        doc_id = hashlib.md5(uploaded_file.name.encode()).hexdigest()[:12]
         
-        # Extract text
         with st.spinner("Extracting text..."):
-            # Write to temp file for processing
             suffix = Path(uploaded_file.name).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(uploaded_file.getvalue())
@@ -476,19 +399,27 @@ def main():
                 cleaned_text = clean_text(raw_text)
                 chunks = chunk_into_paragraphs(cleaned_text)
             finally:
-                tmp_path.unlink()  # Clean up temp file
+                tmp_path.unlink()
         
         if not chunks:
             st.error("Could not extract any text from this file.")
             return
         
-        st.success(f"Loaded **{uploaded_file.name}** — {len(chunks)} chunks, ~{sum(len(c.split()) for c in chunks):,} words")
+        audio_cache = {}
+        progress_bar = st.progress(0, text="Generating audio...")
         
-        # Render TTS component
-        tts_html = get_tts_component(chunks, doc_id)
-        html(tts_html, height=450, scrolling=False)
+        for i, chunk in enumerate(chunks):
+            audio_cache[i] = get_audio_base64(chunk)
+            progress_bar.progress((i + 1) / len(chunks), text=f"Generating audio... {i + 1}/{len(chunks)}")
         
-        # Optional: show full text in expander
+        progress_bar.empty()
+        
+        word_count = sum(len(c.split()) for c in chunks)
+        st.success(f"Loaded **{uploaded_file.name}** — {len(chunks)} chunks, ~{word_count:,} words")
+        
+        player_html = get_player_component(chunks, doc_id, audio_cache)
+        html(player_html, height=400, scrolling=False)
+        
         with st.expander("View full text"):
             st.text_area(
                 "Document content",
@@ -498,9 +429,7 @@ def main():
                 label_visibility="collapsed"
             )
     else:
-        # Show placeholder component
-        placeholder_html = get_tts_component([], "placeholder")
-        html(placeholder_html, height=450, scrolling=False)
+        html(get_player_component([], "placeholder", {}), height=400, scrolling=False)
 
 
 if __name__ == "__main__":

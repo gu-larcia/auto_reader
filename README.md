@@ -1,23 +1,24 @@
 # Auto-Reader
 
-File-to-speech with position persistence. Upload a document, press play, pause whenever, close the browser, come back later—it picks up where you left off.
+v1.0.1
 
-## The Problem
+Upload a document. Press play. Pause. Close browser. Return. Resume from exact position.
 
-OS text-to-speech (highlight text → right-click → "Speak") loses your position when you stop. Long documents become unmanageable.
+## Problem
 
-## The Solution
+OS text-to-speech loses position on stop. Long documents become unnavigable.
 
-Web Speech API in browser with localStorage tracking paragraph and word position.
+## Solution
+
+Pre-generate audio via edge-tts (Microsoft neural voices). Track chunk + timestamp in localStorage.
 
 ## Features
 
-- **Supported formats**: PDF, EPUB, DOCX, TXT, Markdown
+- **Formats**: PDF, EPUB, DOCX, TXT, Markdown
 - **Controls**: Play, Pause, Stop, Previous/Next chunk, Reset
-- **Position tracking**: Saves paragraph + word index to localStorage
-- **Persistence**: Survives browser refresh, keyed by filename
-- **Speed control**: 0.5x to 2x
-- **Voice selection**: Uses available system voices
+- **Persistence**: Chunk index + playback time saved per document
+- **Speed**: 0.5x to 2x
+- **Voice**: en-US-JennyNeural (female, US English)
 
 ## Setup
 
@@ -34,29 +35,29 @@ Opens at `http://localhost:8501`
 ```
 Upload → Extract text (PyMuPDF/ebooklib/python-docx)
               ↓
-         Clean text (fix hyphenation, normalize whitespace)
+         Clean text (dehyphenate, normalize)
               ↓
          Chunk into paragraphs
               ↓
-         Web Speech API (browser JS)
+         Generate audio per chunk (edge-tts)
               ↓
-         onboundary event → update word index
+         HTML5 audio player
               ↓
-         localStorage → persist position
+         localStorage persistence
 ```
 
 ## Limitations
 
-- Voice quality depends on OS/browser
-- Tab must stay visible (browser restricts background audio)
-- DOC format (legacy Word) not supported—convert to DOCX first
+- Requires internet (edge-tts uses Microsoft servers)
+- Initial audio generation takes time proportional to document length
+- DOC format unsupported (convert to DOCX)
 
-## File Structure
+## Files
 
 ```
 auto-reader/
-├── app.py           # Streamlit app + JS component
-├── extractors.py    # Text extraction by format
+├── app.py           # Streamlit app + audio player
+├── extractors.py    # Text extraction
 ├── requirements.txt
 └── README.md
 ```
